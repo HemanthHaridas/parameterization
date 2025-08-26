@@ -1,2 +1,9 @@
 __pycache__
 data
+*.inp
+*.log
+*.qeq
+*.q
+*.frc
+*.dat
+*.sw

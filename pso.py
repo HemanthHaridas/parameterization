@@ -20,6 +20,7 @@ from mpi4py import MPI
 from initial_values import _values, _keys, _weight
 from initial_values import _margin, _num_walkers
 from initial_values import _local_rate, _global_rate
+from initial_values import _max_iter
 
 # Importing settings related to constraints, counters, periodic boundary conditions (PBC), and charge dumping
 from settings import _fixed_values, _constraints_data, _constraints_data_keys
@@ -613,11 +614,34 @@ _best_walker, _best_error = walker_evaluate(
     errors=[_walker.error for _walker in walkers]
 )
 
-_current_best_error = numpy.inf
+_current_best_error = _best_error
 
-while (_current_best_error <= _best_error):
+# begin optimization loop
+_iter = 1
+
+while ((_current_best_error >= _best_error) or (_iter > _max_iter)):
+    # set the previous best error to current best error
+    _current_best_error = _best_error
+
+    # evaluate all walkers
     for _index, _walker in enumerate(walkers):
-        _walker.gbest = _walker[_index].position
+        # set the current best position
+        _walker.gbest = walkers[_best_walker].position
+        # update the positions of the walkers to move towards current global best
         _walker.update(weight=_weight, local_rate=_local_rate, global_rate=_global_rate)
+        # regenerate the input files
+        _walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_index)
+        # compute the updated walkers
         _walker.compute(index=_index)
+        # evaluate them
         _walker.evaluate(index=_index)
+
+    # get the current best walker
+    _best_walker, _best_error = walker_evaluate(
+        errors=[_walker.error for _walker in walkers]
+    )
+
+    # log the current best error, current error and best walker
+    with open("pso.log", "a") as logger:
+        logger.write("Current Best Walker: {:10.0f} Current Best Error: {:10.3f} Current Error: {:10.3f}\n".format(
+            _best_walker, _current_best_error, _best_error))
