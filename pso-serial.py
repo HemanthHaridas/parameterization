@@ -173,7 +173,7 @@ class Particle:
             # Generate final LAMMPS input file using assembled parameters
             create_final_lammps_input(params=_params, walker_index=index)
 
-    def compute(self, index: int, communicator):
+    def compute(self, index: int):
         """
         Searches for LAMMPS input files matching a specific index pattern
         and prints the list of matched filenames.
@@ -195,7 +195,6 @@ class Particle:
                 # Initialize a LAMMPS handler instance.
                 # This object interfaces with the LAMMPS simulation engine and allows execution of input scripts.
                 _lammps_handler = lammps.lammps(
-                    comm=communicator,
                     cmdargs=["-log", f"{_file[:-4]}.log"]
                 )
                 _lammps_handler.file(_file)
@@ -629,7 +628,6 @@ for _generation in range(1, _num_generations):
         _best_walker, _best_error = walker_evaluate(
             errors=[_walker.error for _walker in walkers]
         )
-        _current_best_error = _best_error
 
         with open("pso.log", "a") as logger:
             logger.write("Generation: {:10.0f} Best Walker: {:10.0f} Best Error: {:10.3f} Current Error: {:10.3f}\n".format(
