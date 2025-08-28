@@ -26,7 +26,8 @@ _keys = ["chi_Al",     "chi_H",      "chi_Na",    "chi_O",
 
 _weight = 0.5  # mixing parameter
 _margin = 0.2  # 20% variance
-_num_walkers = 10  # default
+_num_walkers = 4  # default
 _global_rate = 0.8
 _local_rate = 0.2
-_max_iter = 1000
+_max_iter = 100
+_num_generations = 10
