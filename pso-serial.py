@@ -14,8 +14,6 @@ import typing
 import glob
 import lammps
 
-from mpi4py import MPI
-
 # Importing initial configuration values and simulation parameters
 from initial_values import _values, _keys, _weight
 from initial_values import _margin, _num_walkers
@@ -44,9 +42,9 @@ class Particle:
         # Assign a random initial velocity vector of same dimension
         self.velocity = numpy.random.random(len(position))
         # Personal best position (to be updated during optimization)
-        self.pbest = None
+        self.pbest = position
         # Global best position (shared across swarm)
-        self.gbest = None
+        self.gbest = position
         # Initial error is set to infinity (to be minimized)
         self.error = numpy.inf
 
@@ -385,7 +383,7 @@ class Particle:
 
         _final_error = 100 * sum(errors) / sum(weights)
 
-        if _final_error <= self.error:
+        if _final_error < self.error:
             self.error = _final_error
             self.pbest = self.position
 
@@ -591,94 +589,55 @@ _energy_reference = create_params(keys=_reference_data_keys, values=_reference_d
 _constraints = create_params(keys=_constraints_data_keys, values=_constraints_data)
 _counters = create_params(keys=_counter_data_keys, values=_counter_data)
 
-# MPI init section
-_comm = MPI.COMM_WORLD
-_size = _comm.Get_size()
-_rank = _comm.Get_rank()
-_root = (_rank == 0)
-
 # gather list of walkers generated on root
-if _root:
-    walkers = create_walkers(values=numpy.array(_values), margin=_margin, num_walkers=_num_walkers)
-else:
-    walkers = None
-
-# Scatter walkers to all ranks
-_this_ranks_walker = _comm.scatter(walkers, root=0)
-
-# split into _nrank subcommunicators
-_split = _comm.Split(_rank, key=_rank)
-
-# evaluate walkers in parallel
-_this_ranks_walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_rank)
-_this_ranks_walker.compute(index=_rank, communicator=_split)
-_this_ranks_walker.evaluate(index=_rank)
-
-# for _index, _walker in enumerate(walkers):
-#     _walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_index)
-#     _walker.compute(index=_index)
-#     _walker.evaluate(index=_index)
-
-# now figure out which walker was the closest to minima
-# Gather updated errors
-local_error = _this_ranks_walker.error
-all_errors = _comm.gather(local_error, root=0)
-
-if _root:
-    _best_walker, _best_error = walker_evaluate(
-        errors=all_errors
-    )
-else:
-    _best_walker, _best_error = None, None
-
-# Broadcast best walker index and error to all ranks
-_best_walker = _comm.bcast(_best_walker, root=0)
-_best_error = _comm.bcast(_best_error, root=0)
-_current_best_error = _best_error
+walkers = create_walkers(values=numpy.array(_values), margin=_margin, num_walkers=_num_walkers)
 
 # Outer optimization loop
 for _generation in range(1, _num_generations):
     _iter = 1
 
+    # need to compute the first step separately
+    # evaluate walkers in serial
+    for _index, _walker in enumerate(walkers):
+        _walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_index)
+        _walker.compute(index=_index)
+        _walker.evaluate(index=_index)
+
+    # now figure out which walker was the closest to minima
+    # Gather updated errors
+    _best_walker, _best_error = walker_evaluate(
+        errors=[_walker.error for _walker in walkers]
+    )
+    _current_best_error = _best_error
+
     while (_current_best_error >= _best_error) and (_iter <= _max_iter):
         _iter += 1
         _current_best_error = _best_error
 
-        # Broadcast best position to all ranks
-        if _root:
-            gbest_position = walkers[_best_walker].position
-        else:
-            gbest_position = None
-        gbest_position = _comm.bcast(gbest_position, root=0)
+        # find the global best from the previous iteration
+        gbest_position = walkers[_best_walker].position
 
         # Each rank updates its walker
-        _this_ranks_walker.gbest = gbest_position
-        if _iter > 1:
-            _this_ranks_walker.update(weight=_weight, local_rate=_local_rate, global_rate=_global_rate)
-        _this_ranks_walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_rank)
-        _this_ranks_walker.compute(index=_rank, communicator=_split)
-        _this_ranks_walker.evaluate(index=_rank)
+        for _index, _walker in enumerate(walkers):
+            _walker.gbest = gbest_position
+            _walker.update(weight=_weight, local_rate=_local_rate, global_rate=_global_rate)
+            _walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_index)
+            _walker.compute(index=_index)
+            _walker.evaluate(index=_index)
 
         # Gather updated errors
-        local_error = _this_ranks_walker.error
-        all_errors = _comm.gather(local_error, root=0)
+        _best_walker, _best_error = walker_evaluate(
+            errors=[_walker.error for _walker in walkers]
+        )
+        _current_best_error = _best_error
 
-        if _root:
-            _best_walker, _best_error = walker_evaluate(errors=all_errors)
-            with open("pso.log", "a") as logger:
-                logger.write("Generation: {:10.0f} Best Walker: {:10.0f} Best Error: {:10.3f} Current Error: {:10.3f}\n".format(
-                    _generation, _best_walker, _best_error, _current_best_error))
+        with open("pso.log", "a") as logger:
+            logger.write("Generation: {:10.0f} Best Walker: {:10.0f} Best Error: {:10.3f} Current Error: {:10.3f}\n".format(
+                _generation, _best_walker, _best_error, _current_best_error))
 
     # Save best position
-    if _root:
-        with open("pso-best.log", "a") as poslogger:
-            numpy.savetxt(poslogger, walkers[_best_walker].position, fmt="%10.6f", delimiter=" ")
+    with open("pso-best.log", "a") as poslogger:
+        numpy.savetxt(poslogger, walkers[_best_walker].position, fmt="%10.6f", delimiter=" ")
 
     # Regenerate walkers from best position
-    if _root:
-        walkers = create_walkers(values=walkers[_best_walker].position, margin=_margin, num_walkers=_num_walkers)
-    else:
-        walkers = None
-
-    # Scatter new walkers
-    _this_ranks_walker = _comm.scatter(walkers, root=0)
+    walkers = create_walkers(values=walkers[_best_walker].position, margin=_margin, num_walkers=_num_walkers)
