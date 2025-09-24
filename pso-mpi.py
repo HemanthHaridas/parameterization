@@ -414,7 +414,7 @@ def create_params(keys: list[str],
 
 # Function to initialize a swarm of walkers (particles) for optimization
 
-def create_walkers(values: list[float], margin: float, num_walkers: int):
+def create_walkers(values: list[float], margin: float, num_walkers: int, gbest_pos: typing.Optional[list[float]] = None):
     """
     Initializes a list of Particle instances with randomized positions
     within a margin around the reference values.
@@ -438,12 +438,18 @@ def create_walkers(values: list[float], margin: float, num_walkers: int):
             _max_values.shape[0], num_walkers))
 
     # Instantiate Particle objects using column-wise slices of _params
-    return [
+    walkers = [
         Particle(position=_params[:, i], index=i) for i in range(num_walkers)
     ]
 
+    if gbest_pos is not None:
+        for walker in walkers:
+            walker.gbest = gbest_pos
+
+    return walkers
 
 # create lammps input files
+
 
 def create_final_lammps_input(params: typing.Dict[str, str], walker_index: int) -> None:
     _file = params["filename"]  # get file name
@@ -633,6 +639,10 @@ _global_num_chunks = _comm.bcast(num_chunks, root=0)
 # split into nchunks subcommunicators
 _split = _comm.Split(_rank % _global_num_chunks, key=_rank)
 
+# book keeping
+_global_best_error = numpy.inf
+_global_best_position = None
+
 # Outer optimization loop
 for _generation in range(1, _num_generations):
     _iter = 1
@@ -641,6 +651,7 @@ for _generation in range(1, _num_generations):
     # evaluate walkers in parallel
     for _walker in _this_ranks_walkers:
         _walker.create_lammps_param_set(constraints=_constraints, counters=_counters, index=_walker.index)
+        _walker.gbest = _global_best_position if _global_best_position is not None else _walker.position
         _walker.compute(index=_walker.index, communicator=_split)
         _walker.evaluate(index=_walker.index)
 
@@ -652,21 +663,29 @@ for _generation in range(1, _num_generations):
     if _root:
         _all_errors = numpy.concatenate(_gathered_errors).tolist()
         _best_walker, _best_error = walker_evaluate(errors=_all_errors)
+        if _best_error < _global_best_error:
+            _global_best_error = _best_error
+            _global_best_position = walkers[_best_walker].position
     else:
         _best_walker, _best_error = None, None
 
     # Broadcast best walker index and error to all ranks
     _best_walker = _comm.bcast(_best_walker, root=0)
     _best_error = _comm.bcast(_best_error, root=0)
+
+    # Broadcast the global best position and error to all ranks
+    _global_best_error = _comm.bcast(_global_best_error, root=0)
+    _global_best_position = _comm.bcast(_global_best_position, root=0)
+
     _current_best_error = _best_error
 
     while (_current_best_error >= _best_error) and (_iter <= _max_iter):
         _iter += 1
-        _current_best_error = _best_error
+        _current_best_error = min(_best_error, _current_best_error)
 
         # Broadcast best position to all ranks
         if _root:
-            gbest_position = walkers[_best_walker].position
+            gbest_position = _global_best_position
         else:
             gbest_position = None
 
@@ -687,12 +706,26 @@ for _generation in range(1, _num_generations):
         if _root:
             _all_errors = numpy.concatenate(_gathered_errors).tolist()
             _best_walker, _best_error = walker_evaluate(errors=_all_errors)
+
+            # Take care of the errors
+            if _best_error < _global_best_error:
+                _global_best_error = _best_error
+                _global_best_position = walkers[_best_walker].position
+
+            # Write the current best
+            with open("pso-current-best.log", "w") as poslogger:
+                numpy.savetxt(poslogger, _global_best_position, fmt="%10.6f", delimiter=" ")
+                poslogger.write("\n")
         else:
             _best_walker, _best_error = None, None
 
         # Broadcast best walker index and error to all ranks
         _best_walker = _comm.bcast(_best_walker, root=0)
         _best_error = _comm.bcast(_best_error, root=0)
+
+        # Broadcast the global best position and error to all ranks
+        _global_best_error = _comm.bcast(_global_best_error, root=0)
+        _global_best_position = _comm.bcast(_global_best_position, root=0)
 
         if _root:
             with open("pso.log", "a") as logger:
@@ -706,9 +739,11 @@ for _generation in range(1, _num_generations):
             poslogger.write("\n")
 
     # Regenerate walkers from best position
+    # also keep the best walker from the previous step
     if _root:
-        walkers = create_walkers(values=numpy.array(gbest_position), margin=_margin, num_walkers=_num_walkers)
-        walker_chunks = create_chunks(walkers=walkers, nprocs=_size, nwalkers=_num_walkers)
+        walkers = create_walkers(values=numpy.array(gbest_position), margin=_margin,
+                                 num_walkers=_num_walkers, gbest_pos=gbest_position)
+        walker_chunks = create_chunks(walkers=walkers, nprocs=_size, nwalkers=len(walkers))
     else:
         walkers = None
 
