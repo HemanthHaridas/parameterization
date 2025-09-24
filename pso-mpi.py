@@ -203,7 +203,6 @@ class Particle:
                     cmdargs=["-log", f"{_file[:-4]}.log"]
                 )
                 _lammps_handler.file(_file)
-                _lammps_handler.close()
 
             except lammps.MPIAbortException:
                 # Catch and silently ignore MPIAbortException.
@@ -217,6 +216,10 @@ class Particle:
                 # This helps with debugging malformed input files or runtime issues
                 # without halting the entire batch execution.
                 print(_exception)
+
+            finally:
+                if _lammps_handler is not None:
+                    _lammps_handler.close()
 
     def evaluate(self, index: int):
         ener_dat = {}
